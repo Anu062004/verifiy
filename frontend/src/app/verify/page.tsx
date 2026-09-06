@@ -3,15 +3,17 @@
 import Link from "next/link";
 import Image from "next/image";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowUpRight, Check, CircleAlert, Database, Fingerprint, LoaderCircle, RotateCcw, Search, ShieldCheck, Upload } from "lucide-react";
+import { ArrowUpRight, Check, CircleAlert, Database, Fingerprint, LoaderCircle, RotateCcw, Search, ShieldCheck, Upload, Wallet } from "lucide-react";
 import { ThemeToggle } from "@/components/layout/theme-toggle";
+import { EXPLORER, connectWallet, shortAddress, submitRecordAsUser } from "@/lib/wallet";
 
 type Face = { status: "verified" | "not_verified" | "unavailable"; verified: boolean | null; model: string; distance: number | null; threshold: number | null; reason?: string };
 type Candidate = { index: number; page_url: string; page_title: string | null; reverse_match_type: string; is_social: boolean; face_verification?: Face };
+type Signing = { chainId: number; contractAddress: string; storageRootHash: string; photoCommitment: string; matchedUrlCommitment: string };
 type Run = {
   runId: string; status: string; photoCommitment?: string; candidates: Candidate[]; readbackVerified?: boolean; error?: string;
   storage?: { rootHash: string; txHash: string };
-  chain?: { recordId: string; txHash: string; explorerUrl: string };
+  chain?: { recordId: string; txHash: string; explorerUrl?: string };
 };
 type Health = { status: string; searchReady: boolean; commitReady: boolean; checks: Record<string, boolean>; error?: string };
 
@@ -19,6 +21,7 @@ const statusText: Record<string, string> = {
   encoding_face: "Encoding face locally", searching_web: "Searching indexed pages", search_complete: "Candidates ready",
   face_checked: "Face evidence ready", committing: "Publishing proof", record_created: "Record prepared",
   storage_uploaded: "Stored on 0G", storage_verified: "Storage proof verified", chain_mined: "Chain transaction mined",
+  awaiting_signature: "Waiting for wallet signature", settling: "Confirming your transaction",
   complete: "Read-back verified", failed: "Run stopped",
 };
 
@@ -41,8 +44,10 @@ export default function VerifyPage() {
   const [operator, setOperator] = useState("demo_operator");
   const [reviewed, setReviewed] = useState(false);
   const [approved, setApproved] = useState(false);
-  const [busy, setBusy] = useState<"search" | "verify" | "commit" | null>(null);
+  const [busy, setBusy] = useState<"search" | "verify" | "commit" | "sign" | null>(null);
   const [error, setError] = useState("");
+  const [signing, setSigning] = useState<Signing | null>(null);
+  const [account, setAccount] = useState("");
 
   useEffect(() => {
     fetch("/api/pipeline", { cache: "no-store" }).then(json).then(setHealth).catch((reason) =>
@@ -82,14 +87,42 @@ export default function VerifyPage() {
     if (!run || selected === null) return;
     setBusy("commit"); setError("");
     try {
-      setRun(await json(await fetch("/api/pipeline", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "commit", jobId: run.runId, candidateIndex: selected, operator, humanConfirmed: reviewed, publishConfirmed: approved }) })));
+      const body = await json(await fetch("/api/pipeline", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "commit", jobId: run.runId, candidateIndex: selected, operator, humanConfirmed: reviewed, publishConfirmed: approved }) }));
+      setRun(body.run);
+      setSigning(body.signing || null);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Commit failed"); }
     finally { setBusy(null); }
   }, [approved, operator, reviewed, run, selected]);
 
+  const connect = useCallback(async () => {
+    setError("");
+    try {
+      setAccount(await connectWallet());
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Wallet connection failed"); }
+  }, []);
+
+  const signAndPay = useCallback(async () => {
+    if (!run || !signing) return;
+    setBusy("sign"); setError("");
+    try {
+      const address = account || await connectWallet();
+      setAccount(address);
+      const txHash = await submitRecordAsUser(signing.contractAddress, signing.storageRootHash, signing.photoCommitment, signing.matchedUrlCommitment);
+      const body = await json(await fetch("/api/pipeline", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "settle", jobId: run.runId, txHash }) }));
+      setRun(body);
+      setSigning(null);
+    } catch (reason) {
+      const code = (reason as { code?: unknown })?.code;
+      setError(code === "ACTION_REJECTED" || code === 4001
+        ? "Signature rejected in your wallet — nothing was spent. The prepared record is still waiting."
+        : reason instanceof Error ? reason.message : "Signing failed");
+    }
+    finally { setBusy(null); }
+  }, [account, run, signing]);
+
   const reset = useCallback(async () => {
     if (run && run.status !== "complete") await fetch(`/api/pipeline?jobId=${encodeURIComponent(run.runId)}`, { method: "DELETE" }).catch(() => undefined);
-    setFile(null); setPreview(""); setConsent(false); setRun(null); setSelected(null); setReviewed(false); setApproved(false); setError("");
+    setFile(null); setPreview(""); setConsent(false); setRun(null); setSelected(null); setReviewed(false); setApproved(false); setError(""); setSigning(null);
     if (input.current) input.current.value = "";
   }, [run]);
 
@@ -145,8 +178,8 @@ export default function VerifyPage() {
 
             <aside id="proof" className="space-y-5">
               <section className="panel"><p className="eyebrow">Live status</p><h2 className="mt-1 text-xl font-semibold">Pipeline readiness</h2><div className="mt-5 space-y-3">{Object.entries(health?.checks || { backend: health?.status === "online" }).map(([label, ready]) => <div key={label} className="flex items-center justify-between border-b border-border pb-3 text-sm last:border-0"><span>{label.replace(/([A-Z])/g, " $1")}</span><span className={`inline-flex items-center gap-1 font-mono text-xs ${ready ? "text-success" : "text-warning"}`}>{ready ? <Check className="h-3.5 w-3.5" /> : <CircleAlert className="h-3.5 w-3.5" />}{ready ? "READY" : "SETUP"}</span></div>)}</div>{health?.error && <p className="mt-4 text-sm text-danger">{health.error}</p>}</section>
-              <section className="panel"><p className="eyebrow">Run trace</p><h2 className="mt-1 text-xl font-semibold">Integrity proof</h2><dl className="mt-5 space-y-4 text-sm"><div><dt className="text-muted">Run state</dt><dd className="mt-1 font-semibold">{run ? statusText[run.status] || run.status : "Waiting for input"}</dd></div><div><dt className="text-muted">Photo SHA-256</dt><dd className="mt-1 break-all font-mono text-xs">{short(run?.photoCommitment)}</dd></div><div><dt className="text-muted">0G storage root</dt><dd className="mt-1 break-all font-mono text-xs">{short(run?.storage?.rootHash)}</dd></div><div><dt className="text-muted">Chain record</dt><dd className="mt-1 font-mono text-xs">{run?.chain?.recordId ?? "Pending"}</dd></div></dl>{run?.status === "complete" && run.chain && <a href={run.chain.explorerUrl} target="_blank" rel="noopener noreferrer" className="mt-5 flex min-h-11 items-center justify-center gap-2 rounded-lg bg-success-soft px-4 text-sm font-semibold text-success">View transaction<ArrowUpRight className="h-4 w-4" /></a>}</section>
-              {choice && face && face.status !== "not_verified" && run?.status !== "complete" && <section className="panel border-cobalt shadow-[var(--shadow)]"><p className="eyebrow">Final gate</p><h2 className="mt-1 text-xl font-semibold">Confirm and publish</h2><p className="mt-2 text-sm text-muted">The matched URL and evidence become public in 0G Storage. The chain stores commitments.</p><label className="mt-5 block text-sm font-medium">Operator label<input value={operator} onChange={(event) => setOperator(event.target.value)} maxLength={80} className="mt-2 min-h-11 w-full rounded-lg border border-border bg-input px-3 focus:border-cobalt" /></label><label className="check-row"><input type="checkbox" checked={reviewed} onChange={(event) => setReviewed(event.target.checked)} />I opened the returned page and confirmed the consenting subject.</label><label className="check-row"><input type="checkbox" checked={approved} onChange={(event) => setApproved(event.target.checked)} />I approve publishing this record to 0G testnet.</label>{!health?.commitReady && <p className="mt-4 text-xs text-warning">Wallet or contract setup is incomplete. Backend preflight will block writes.</p>}<button onClick={commit} disabled={!eligible || busy !== null} className="primary mt-5 w-full">{busy === "commit" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}{busy === "commit" ? "Publishing and verifying…" : "Commit verified record"}</button></section>}
+              <section className="panel"><p className="eyebrow">Run trace</p><h2 className="mt-1 text-xl font-semibold">Integrity proof</h2><dl className="mt-5 space-y-4 text-sm"><div><dt className="text-muted">Run state</dt><dd className="mt-1 font-semibold">{run ? statusText[run.status] || run.status : "Waiting for input"}</dd></div><div><dt className="text-muted">Photo SHA-256</dt><dd className="mt-1 break-all font-mono text-xs">{short(run?.photoCommitment)}</dd></div><div><dt className="text-muted">0G storage root</dt><dd className="mt-1 break-all font-mono text-xs">{short(run?.storage?.rootHash)}</dd></div><div><dt className="text-muted">Chain record</dt><dd className="mt-1 font-mono text-xs">{run?.chain?.recordId ?? "Pending"}</dd></div></dl>{run?.status === "complete" && run.chain && <a href={run.chain.explorerUrl || `${EXPLORER}/tx/${run.chain.txHash}`} target="_blank" rel="noopener noreferrer" className="mt-5 flex min-h-11 items-center justify-center gap-2 rounded-lg bg-success-soft px-4 text-sm font-semibold text-success">View transaction<ArrowUpRight className="h-4 w-4" /></a>}</section>
+              {choice && face && face.status !== "not_verified" && run?.status !== "complete" && <section className="panel border-cobalt shadow-[var(--shadow)]"><p className="eyebrow">Final gate</p><h2 className="mt-1 text-xl font-semibold">Confirm and publish</h2><p className="mt-2 text-sm text-muted">The matched URL and evidence become public in 0G Storage. The chain stores commitments.</p><label className="mt-5 block text-sm font-medium">Operator label<input value={operator} onChange={(event) => setOperator(event.target.value)} maxLength={80} className="mt-2 min-h-11 w-full rounded-lg border border-border bg-input px-3 focus:border-cobalt" /></label><label className="check-row"><input type="checkbox" checked={reviewed} onChange={(event) => setReviewed(event.target.checked)} />I opened the returned page and confirmed the consenting subject.</label><label className="check-row"><input type="checkbox" checked={approved} onChange={(event) => setApproved(event.target.checked)} />I approve publishing this record to 0G testnet.</label>{!health?.commitReady && <p className="mt-4 text-xs text-warning">Wallet or contract setup is incomplete. Backend preflight will block writes.</p>}{signing && run?.status === "awaiting_signature" ? <div className="mt-5 border-t border-border pt-5"><p className="text-sm font-semibold">Pay and publish from your wallet</p><p className="mt-1 text-xs text-muted">The record is stored. Your wallet signs the registry transaction and pays its gas — the operator key never touches it.</p><dl className="mt-3 space-y-1.5 font-mono text-[11px]"><div className="flex justify-between gap-2"><dt className="text-muted">Storage root</dt><dd className="truncate">{short(signing.storageRootHash)}</dd></div><div className="flex justify-between gap-2"><dt className="text-muted">Contract</dt><dd className="truncate">{short(signing.contractAddress)}</dd></div><div className="flex justify-between gap-2"><dt className="text-muted">Wallet</dt><dd>{account ? shortAddress(account) : "Not connected"}</dd></div></dl><div className="mt-4 flex gap-2">{!account && <button onClick={connect} className="control flex-1 border border-border"><Wallet className="h-4 w-4" />Connect wallet</button>}<button onClick={signAndPay} disabled={busy !== null} className="primary flex-1">{busy === "sign" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Wallet className="h-4 w-4" />}{busy === "sign" ? "Waiting for signature…" : "Sign and pay in wallet"}</button></div></div> : <button onClick={commit} disabled={!eligible || busy !== null} className="primary mt-5 w-full">{busy === "commit" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}{busy === "commit" ? "Preparing record…" : "Commit verified record"}</button>}</section>}
             </aside>
           </div>
         </div>

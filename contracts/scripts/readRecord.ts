@@ -15,7 +15,11 @@ cli(async () => {
     if (!receipt) throw new Error("Transaction is not mined or is unknown; inspect the explorer before retrying a write");
     id = createdRecordId(contract, receipt);
   }
-  const result = { chainId: CHAIN_ID, contractAddress: await contract.getAddress(), recordId: recordId(id).toString(), ...recordJson(await contract.getRecord(recordId(id))) };
+  const result: Record<string, unknown> = { chainId: CHAIN_ID, contractAddress: await contract.getAddress(), recordId: recordId(id).toString(), ...recordJson(await contract.getRecord(recordId(id))) };
+  if (byTx) {
+    const receipt = await rpc.getTransactionReceipt(hash32(value, "transaction hash"));
+    if (receipt) result.blockNumber = receipt.blockNumber;
+  }
   rpc.destroy();
   return result;
 });

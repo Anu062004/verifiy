@@ -37,7 +37,7 @@ export async function POST(request: NextRequest) {
 
     const body = await request.json();
     const jobId = typeof body.jobId === "string" ? encodeURIComponent(body.jobId) : "";
-    if (!jobId || !["verify", "commit"].includes(body.action)) {
+    if (!jobId || !["verify", "commit", "settle"].includes(body.action)) {
       return NextResponse.json({ error: "Invalid pipeline action" }, { status: 400 });
     }
     const { action, jobId: _jobId, ...payload } = body;

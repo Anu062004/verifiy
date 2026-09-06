@@ -90,6 +90,8 @@ class ApiChecks(unittest.TestCase):
             self.client.post(f"/api/jobs/{run_id}/verify", json={"candidateIndex": 0})
 
         root = sha256_bytes(b"synthetic-root")
+        good_tx, bad_tx = "0x" + "ab" * 32, "0x" + "cd" * 32
+        signing: dict = {}
 
         def fake_node(script, *args, **_kwargs):
             if script == "scripts/preflight.ts":
@@ -100,24 +102,52 @@ class ApiChecks(unittest.TestCase):
                 record_path = self.directory / "output" / run_id / "verification_record.json"
                 Path(args[2]).write_bytes(record_path.read_bytes())
                 return {"rootHash": root, "proofVerified": True}
-            return {"recordId": "0", "chainId": 16602, "contractAddress": "0x" + "12" * 20,
-                    "txHash": root, "blockNumber": 1, "explorerUrl": "synthetic-test-only"}
+            if script.endswith("readRecord.ts"):
+                commitments = {
+                    "storageRootHash": signing["storageRootHash"],
+                    "photoCommitment": signing["photoCommitment"],
+                    "matchedUrlCommitment": signing["matchedUrlCommitment"],
+                }
+                if args[1] == bad_tx:
+                    commitments["photoCommitment"] = sha256_bytes(b"someone-elses-photo")
+                return {"chainId": 16602, "contractAddress": signing["contractAddress"],
+                        "recordId": "0", "submitter": "0x" + "34" * 20, "blockNumber": 1,
+                        "timestamp": 1, **commitments}
+            raise AssertionError(f"unexpected node call: {script} {args}")
+
+        commit_body = {"candidateIndex": 0, "operator": "test_operator",
+                       "humanConfirmed": True, "publishConfirmed": True}
+        with patch.object(api_app, "run_node_json", side_effect=fake_node), \
+             patch("verify_record.verify", return_value={"verified": True}):
+            prepared = self.client.post(f"/api/jobs/{run_id}/commit", json=commit_body)
+        self.assertEqual(prepared.status_code, 200)
+        self.assertEqual(prepared.json["run"]["status"], "awaiting_signature")
+        signing.update(prepared.json["signing"])
+        self.assertEqual(signing["storageRootHash"], root)
+
+        # Re-committing reissues the same prepared payload without re-uploading.
+        with patch.object(api_app, "run_node_json", side_effect=AssertionError("must not re-upload")):
+            repeated = self.client.post(f"/api/jobs/{run_id}/commit", json=commit_body)
+        self.assertEqual(repeated.status_code, 200)
+        self.assertEqual(repeated.json["signing"], signing)
+
+        # Malformed hash rejected; mismatched commitments rejected without failing the run.
+        malformed = self.client.post(f"/api/jobs/{run_id}/settle", json={"txHash": "nope"})
+        self.assertEqual(malformed.status_code, 400)
+        with patch.object(api_app, "run_node_json", side_effect=fake_node):
+            mismatch = self.client.post(f"/api/jobs/{run_id}/settle", json={"txHash": bad_tx})
+        self.assertEqual(mismatch.status_code, 409)
 
         with patch.object(api_app, "run_node_json", side_effect=fake_node), \
              patch("verify_record.verify", return_value={"verified": True}):
-            committed = self.client.post(
-                f"/api/jobs/{run_id}/commit",
-                json={"candidateIndex": 0, "operator": "test_operator",
-                      "humanConfirmed": True, "publishConfirmed": True},
-            )
-        self.assertEqual(committed.status_code, 200)
-        self.assertEqual(committed.json["status"], "complete")
-        self.assertTrue(committed.json["readbackVerified"])
-        duplicate = self.client.post(
-            f"/api/jobs/{run_id}/commit",
-            json={"candidateIndex": 0, "operator": "test_operator",
-                  "humanConfirmed": True, "publishConfirmed": True},
-        )
+            settled = self.client.post(f"/api/jobs/{run_id}/settle", json={"txHash": good_tx})
+        self.assertEqual(settled.status_code, 200)
+        self.assertEqual(settled.json["status"], "complete")
+        self.assertTrue(settled.json["readbackVerified"])
+
+        again = self.client.post(f"/api/jobs/{run_id}/settle", json={"txHash": good_tx})
+        self.assertEqual(again.status_code, 409)
+        duplicate = self.client.post(f"/api/jobs/{run_id}/commit", json=commit_body)
         self.assertEqual(duplicate.status_code, 409)
         history = self.client.get("/api/history")
         self.assertEqual(history.json["records"][0]["chain_record_id"], "0")
