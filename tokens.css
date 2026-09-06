@@ -1,0 +1,43 @@
+/* Hallmark — authored with taste. */
+:root {
+  --font-display: "Avenir Next", Avenir, "Segoe UI", sans-serif;
+  --font-body: "IBM Plex Sans", "Avenir Next", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  --canvas: #f4f7fb;
+  --ink: #10213d;
+  --muted-ink: #5f6e84;
+  --surface: #ffffff;
+  --surface-raised: #f9fbfe;
+  --line: #d6dfeb;
+  --field: #eef3f9;
+  --cobalt: #155eef;
+  --cobalt-hover: #0f4fcf;
+  --cobalt-soft: #e8f0ff;
+  --success: #16794b;
+  --success-soft: #e7f5ee;
+  --warning: #9b5d08;
+  --warning-soft: #fff3d6;
+  --danger: #bc2f3b;
+  --danger-soft: #fdecef;
+  --shadow: 0 14px 42px rgb(16 33 61 / 8%);
+}
+
+.dark {
+  --canvas: #09111f;
+  --ink: #eef4ff;
+  --muted-ink: #9eacc1;
+  --surface: #101b2d;
+  --surface-raised: #142238;
+  --line: #293a53;
+  --field: #17263d;
+  --cobalt: #6f9fff;
+  --cobalt-hover: #8ab1ff;
+  --cobalt-soft: #172b50;
+  --success: #61d39a;
+  --success-soft: #15382a;
+  --warning: #f0bc62;
+  --warning-soft: #3c2d16;
+  --danger: #ff8994;
+  --danger-soft: #481f28;
+  --shadow: 0 18px 55px rgb(0 0 0 / 26%);
+}

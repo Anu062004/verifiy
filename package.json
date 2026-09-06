@@ -1,0 +1,32 @@
+{
+  "name": "face-chain-verifier",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": ["storage-service", "contracts", "frontend"],
+  "engines": { "node": ">=22 <25" },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "compile": "npm run compile --workspace contracts",
+    "test": "npm run typecheck && npm run test --workspace contracts && tsx --test tests/storage.test.ts",
+    "deploy": "npm run deploy --workspace contracts",
+    "chain:read": "tsx contracts/scripts/readRecord.ts",
+    "chain:write": "tsx contracts/scripts/writeRecord.ts",
+    "storage:upload": "tsx storage-service/src/storage.ts upload",
+    "storage:download": "tsx storage-service/src/storage.ts download",
+    "preflight": "tsx scripts/preflight.ts",
+    "backend:dev": ".venv/bin/python api/app.py",
+    "frontend:dev": "npm run dev --workspace frontend",
+    "frontend:build": "npm run build --workspace frontend",
+    "frontend:start": "npm run start --workspace frontend"
+  },
+  "dependencies": { "dotenv": "17.4.2", "ethers": "6.17.0" },
+  "overrides": {
+    "@0gfoundation/0g-storage-ts-sdk": { "ethers": "$ethers" },
+    "open-jsonrpc-provider": { "axios": "1.20.0" }
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "tsx": "4.23.13",
+    "typescript": "5.9.3"
+  }
+}

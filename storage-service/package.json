@@ -1,0 +1,10 @@
+{
+  "name": "face-chain-storage",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "upload": "tsx src/storage.ts upload",
+    "download": "tsx src/storage.ts download"
+  },
+  "dependencies": { "@0gfoundation/0g-storage-ts-sdk": "1.2.12" }
+}
