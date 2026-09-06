@@ -1,256 +1,157 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
-import { Camera, Upload, X, Loader2, CheckCircle2, AlertCircle, Search, Database } from "lucide-react";
 import Link from "next/link";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { cn } from "@/lib/utils";
+import Image from "next/image";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ArrowUpRight, Check, CircleAlert, Database, Fingerprint, LoaderCircle, RotateCcw, Search, ShieldCheck, Upload } from "lucide-react";
+import { ThemeToggle } from "@/components/layout/theme-toggle";
 
-const sidebarItems = [
-  { icon: Camera, label: "New" },
-  { icon: Upload, label: "Upload" },
-  { icon: Search, label: "Search" },
-  { icon: Database, label: "Records" },
-  { icon: CheckCircle2, label: "Verified" },
-  { icon: AlertCircle, label: "History" },
-] as const;
+type Face = { status: "verified" | "not_verified" | "unavailable"; verified: boolean | null; model: string; distance: number | null; threshold: number | null; reason?: string };
+type Candidate = { index: number; page_url: string; page_title: string | null; reverse_match_type: string; is_social: boolean; face_verification?: Face };
+type Run = {
+  runId: string; status: string; photoCommitment?: string; candidates: Candidate[]; readbackVerified?: boolean; error?: string;
+  storage?: { rootHash: string; txHash: string };
+  chain?: { recordId: string; txHash: string; explorerUrl: string };
+};
+type Health = { status: string; searchReady: boolean; commitReady: boolean; checks: Record<string, boolean>; error?: string };
 
-type SidebarItem = typeof sidebarItems[number];
+const statusText: Record<string, string> = {
+  encoding_face: "Encoding face locally", searching_web: "Searching indexed pages", search_complete: "Candidates ready",
+  face_checked: "Face evidence ready", committing: "Publishing proof", record_created: "Record prepared",
+  storage_uploaded: "Stored on 0G", storage_verified: "Storage proof verified", chain_mined: "Chain transaction mined",
+  complete: "Read-back verified", failed: "Run stopped",
+};
 
-interface ImageRecord {
-  id: string;
-  name: string;
-  type: string;
-  size: number;
-  preview: string;
-  status: "idle" | "encoding" | "ready" | "error";
+async function json(response: Response) {
+  const body = await response.json().catch(() => ({ error: "Invalid server response" }));
+  if (!response.ok) throw new Error(body.error || "Request failed");
+  return body;
 }
 
-export default function VerifyInterfacePage() {
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [images, setImages] = useState<ImageRecord[]>([]);
-  const [note, setNote] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<{ status: string; recordId?: number } | null>(null);
-  const [cameraOpen, setCameraOpen] = useState(false);
-  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+const short = (value?: string) => value ? `${value.slice(0, 12)}…${value.slice(-8)}` : "Pending";
 
-  const handleFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files) return;
-    Array.from(files).forEach((file) => {
-      if (!file.type.startsWith("image/")) return;
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        const preview = ev.target?.result as string;
-        setImages((prev) => [...prev, { id: Math.random().toString(36).slice(2), name: file.name, type: file.type, size: file.size, preview, status: "idle" }]);
-      };
-      reader.readAsDataURL(file);
-    });
-    if (fileInputRef.current) fileInputRef.current.value = "";
+export default function VerifyPage() {
+  const input = useRef<HTMLInputElement>(null);
+  const [file, setFile] = useState<File | null>(null);
+  const [preview, setPreview] = useState("");
+  const [consent, setConsent] = useState(false);
+  const [health, setHealth] = useState<Health | null>(null);
+  const [run, setRun] = useState<Run | null>(null);
+  const [selected, setSelected] = useState<number | null>(null);
+  const [operator, setOperator] = useState("demo_operator");
+  const [reviewed, setReviewed] = useState(false);
+  const [approved, setApproved] = useState(false);
+  const [busy, setBusy] = useState<"search" | "verify" | "commit" | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    fetch("/api/pipeline", { cache: "no-store" }).then(json).then(setHealth).catch((reason) =>
+      setHealth({ status: "offline", searchReady: false, commitReady: false, checks: {}, error: reason.message }));
+  }, []);
+  useEffect(() => () => { if (preview) URL.revokeObjectURL(preview); }, [preview]);
+
+  const choose = useCallback((chosen?: File) => {
+    setError("");
+    if (!chosen) return;
+    if (!chosen.type.startsWith("image/")) return setError("Choose a JPEG, PNG, or WebP image.");
+    if (chosen.size > 8 * 1024 * 1024) return setError("The image must be 8 MiB or smaller.");
+    setFile(chosen); setPreview(URL.createObjectURL(chosen)); setRun(null); setSelected(null);
   }, []);
 
-  const handleDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    Array.from(e.dataTransfer.files).forEach((file) => {
-      if (!file.type.startsWith("image/")) return;
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        const preview = ev.target?.result as string;
-        setImages((prev) => [...prev, { id: Math.random().toString(36).slice(2), name: file.name, type: file.type, size: file.size, preview, status: "idle" }]);
-      };
-      reader.readAsDataURL(file);
-    });
-  }, []);
-
-  const openCamera = useCallback(async () => {
+  const search = useCallback(async () => {
+    if (!file || !consent) return;
+    setBusy("search"); setError("");
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-      setCameraStream(stream);
-      setCameraOpen(true);
-      if (videoRef.current) videoRef.current.srcObject = stream;
-    } catch {}
-  }, []);
+      const form = new FormData(); form.append("photo", file); form.append("consent", "true");
+      setRun(await json(await fetch("/api/pipeline", { method: "POST", body: form })));
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Search failed"); }
+    finally { setBusy(null); }
+  }, [consent, file]);
 
-  const captureImage = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current) return;
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.drawImage(video, 0, 0);
-    const dataUrl = canvas.toDataURL("image/jpeg");
-    setImages((prev) => [...prev, { id: Math.random().toString(36).slice(2), name: "capture.jpg", type: "image/jpeg", size: dataUrl.length, preview: dataUrl, status: "idle" }]);
-    if (cameraStream) { cameraStream.getTracks().forEach((t) => t.stop()); setCameraStream(null); }
-    setCameraOpen(false);
-  }, [cameraStream]);
-
-  const removeImage = useCallback((id: string) => setImages((prev) => prev.filter((i) => i.id !== id)), []);
-
-  const handleEncode = useCallback(async (imageId: string) => {
-    setImages((prev) => prev.map((i) => (i.id === imageId ? { ...i, status: "encoding" } : i)));
-    await new Promise((r) => setTimeout(r, 1500));
-    setImages((prev) => prev.map((i) => (i.id === imageId ? { ...i, status: "ready" } : i)));
-  }, []);
-
-  const handleSubmit = useCallback(async () => {
-    const ready = images.filter((i) => i.status === "ready");
-    if (ready.length === 0) return;
-    setLoading(true);
+  const verify = useCallback(async (index: number) => {
+    if (!run) return;
+    setBusy("verify"); setError(""); setSelected(index); setReviewed(false); setApproved(false);
     try {
-      const res = await fetch("/api/pipeline", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ imageUrl: ready[0].preview, note }) });
-      setResult(await res.json());
-    } catch { setResult({ status: "error" }); }
-    finally { setLoading(false); }
-  }, [images, note]);
+      const body = await json(await fetch("/api/pipeline", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "verify", jobId: run.runId, candidateIndex: index }) }));
+      setRun(body.run);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Face check failed"); }
+    finally { setBusy(null); }
+  }, [run]);
 
-  const formatSize = useCallback((bytes: number) => bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`, []);
+  const commit = useCallback(async () => {
+    if (!run || selected === null) return;
+    setBusy("commit"); setError("");
+    try {
+      setRun(await json(await fetch("/api/pipeline", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "commit", jobId: run.runId, candidateIndex: selected, operator, humanConfirmed: reviewed, publishConfirmed: approved }) })));
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Commit failed"); }
+    finally { setBusy(null); }
+  }, [approved, operator, reviewed, run, selected]);
+
+  const reset = useCallback(async () => {
+    if (run && run.status !== "complete") await fetch(`/api/pipeline?jobId=${encodeURIComponent(run.runId)}`, { method: "DELETE" }).catch(() => undefined);
+    setFile(null); setPreview(""); setConsent(false); setRun(null); setSelected(null); setReviewed(false); setApproved(false); setError("");
+    if (input.current) input.current.value = "";
+  }, [run]);
+
+  const choice = selected === null ? undefined : run?.candidates[selected];
+  const face = choice?.face_verification;
+  const eligible = Boolean(choice?.is_social && face && face.status !== "not_verified" && reviewed && approved && operator.trim());
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background text-foreground">
-      <aside className={cn("fixed left-0 top-0 z-40 h-full border-r border-border/50 bg-background/50 backdrop-blur-sm transition-all duration-300 flex flex-col", sidebarOpen ? "w-56" : "w-14")}>
-        <div className="flex h-14 items-center justify-between px-4 border-b border-border/50">
-          {sidebarOpen && <div className="flex items-center gap-2"><Camera className="h-4 w-4" /><span className="text-xs font-bold tracking-[0.2em] uppercase">FaceChain</span></div>}
-          <button onClick={() => setSidebarOpen(!sidebarOpen)} className="rounded-md p-1 hover:bg-accent/5 transition-colors">
-            {sidebarOpen ? <X className="h-3.5 w-3.5" /> : <Camera className="h-3.5 w-3.5" />}
-          </button>
-        </div>
-        <nav className="flex-1 overflow-y-auto py-3 px-1.5 space-y-0.5">
-          {sidebarItems.map((item) => (
-            <button key={item.label} className={cn("w-full flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-xs font-medium transition-colors", item.label === "New" ? "bg-accent/10 text-foreground" : "text-muted hover:bg-accent/5 hover:text-foreground")}>
-              <item.icon className="h-4 w-4 flex-shrink-0" />
-              {sidebarOpen && <span>{item.label}</span>}
-            </button>
-          ))}
+    <div className="workbench-shell">
+      <aside className="workbench-rail flex flex-col gap-7 p-5 lg:sticky lg:top-0 lg:h-screen">
+        <Link href="/" className="flex min-h-11 items-center gap-2 font-semibold"><span className="grid h-8 w-8 place-items-center rounded-lg bg-cobalt text-on-cobalt"><Fingerprint className="h-4 w-4" /></span>FaceChain</Link>
+        <nav aria-label="Verification sections" className="mobile-scroll flex gap-2 text-sm lg:flex-col">
+          <a href="#upload" className="rail-link bg-cobalt-soft text-cobalt"><Upload className="h-4 w-4" />Upload</a>
+          <a href="#results" className="rail-link"><Search className="h-4 w-4" />Evidence</a>
+          <a href="#proof" className="rail-link"><ShieldCheck className="h-4 w-4" />Proof</a>
+          <Link href="/records" className="rail-link"><Database className="h-4 w-4" />Records</Link>
         </nav>
-        {sidebarOpen && (
-          <div className="border-t border-border/50 p-3">
-            <div className="flex items-center gap-2 text-[10px] text-muted">
-              <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
-              <span>Secured on 0G</span>
-            </div>
-          </div>
-        )}
+        <p className="mt-auto hidden border-t border-border pt-4 text-xs text-muted lg:block">Local operator session<br />Embeddings stay in memory.</p>
       </aside>
 
-      <main className={cn("flex-1 flex flex-col overflow-y-auto", sidebarOpen ? "ml-56" : "ml-14")}>
-        <header className="sticky top-0 z-30 border-b border-border/50 bg-background/70 backdrop-blur-sm">
-          <div className="flex h-12 items-center justify-between px-8">
-            <div className="flex items-center gap-3">
-              <h1 className="text-sm font-bold tracking-tight">Face Chain Verifier</h1>
-              <Badge variant="secondary" className="text-[10px]">0G Galileo</Badge>
-            </div>
-            {images.filter((i) => i.status === "ready").length > 0 && <Badge variant="secondary" className="text-[10px]">{images.filter((i) => i.status === "ready").length} encoded</Badge>}
-          </div>
+      <main className="min-w-0">
+        <header className="sticky top-0 z-30 flex min-h-16 items-center justify-between border-b border-border bg-background/90 px-5 backdrop-blur-md sm:px-8">
+          <div className="flex min-w-0 items-center gap-3"><span className={`status-dot h-2 w-2 shrink-0 rounded-full ${health?.status === "online" ? "bg-success" : "bg-danger"}`} /><div className="min-w-0"><p className="truncate text-sm font-semibold">Local pipeline</p><p className="truncate font-mono text-[11px] text-muted">127.0.0.1:8000 · {health?.status || "checking"}</p></div></div>
+          <div className="flex items-center gap-2">{run && <button onClick={reset} className="control"><RotateCcw className="h-4 w-4" />Reset</button>}<ThemeToggle /></div>
         </header>
 
-        <div className="flex-1 p-10">
-          {result ? (
-            <div className="flex flex-col items-center justify-center py-32 text-center">
-              {result.status === "success" ? (
-                <>
-                  <CheckCircle2 className="mb-4 h-14 w-14 text-green-500" />
-                  <h2 className="mb-1.5 text-xl font-bold">Verification Submitted</h2>
-                  <p className="mb-5 text-xs text-muted">Record #{result.recordId} committed to 0G Galileo</p>
-                  <Link href={`https://chainscan-galileo.0g.ai/tx/${result.recordId}`} target="_blank" rel="noopener" className="text-xs font-medium underline">View on Explorer</Link>
-                </>
-              ) : (
-                <>
-                  <AlertCircle className="mb-4 h-14 w-14 text-red-500" />
-                  <h2 className="mb-1.5 text-xl font-bold">Submission Failed</h2>
-                  <p className="mb-5 text-xs text-muted">Please try again</p>
-                </>
-              )}
-              <Button variant="outline" onClick={() => { setResult(null); setImages([]); setNote(""); }}>New Verification</Button>
+        <div className="mx-auto max-w-[1280px] px-5 py-8 sm:px-8 sm:py-12">
+          <div className="mb-8 max-w-3xl"><p className="eyebrow">Verification workbench</p><h1 className="text-3xl font-semibold leading-tight tracking-[-0.035em] sm:text-5xl">Trace a consenting photo to public evidence.</h1><p className="mt-4 max-w-2xl text-base text-muted sm:text-lg">Run the real face encoder and Google Web Detection locally. You decide which returned page is correct before anything is published.</p></div>
+          {error && <div role="alert" className="mb-6 flex items-start gap-3 border-l-4 border-danger bg-danger-soft px-4 py-3 text-sm text-danger"><CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />{error}</div>}
+
+          <div className="workbench-stage">
+            <div className="min-w-0 space-y-5">
+              <section id="upload" className="panel shadow-[var(--shadow)]" aria-labelledby="upload-title">
+                <div className="section-head"><div><p className="eyebrow">01 / Input</p><h2 id="upload-title" className="mt-1 text-xl font-semibold">Source photo</h2></div><span className="tag">MAX 8 MiB</span></div>
+                <input ref={input} type="file" accept="image/jpeg,image/png,image/webp" className="sr-only" onChange={(event) => choose(event.target.files?.[0])} />
+                {!preview ? <button type="button" onClick={() => input.current?.click()} onDrop={(event) => { event.preventDefault(); choose(event.dataTransfer.files[0]); }} onDragOver={(event) => event.preventDefault()} className="grid min-h-56 w-full place-items-center border border-dashed border-border bg-input px-6 text-center hover:border-cobalt"><span><Upload className="mx-auto mb-4 h-7 w-7 text-cobalt" /><strong className="block">Drop one clear photo here</strong><span className="mt-1 block text-sm text-muted">or click to browse · exactly one face</span></span></button> :
+                  <div className="grid gap-5 sm:grid-cols-[180px_1fr]"><Image src={preview} alt="Selected source preview" width={360} height={176} unoptimized className="h-44 w-full object-cover" /><div className="min-w-0 self-center"><p className="truncate font-semibold">{file?.name}</p><p className="mt-1 text-sm text-muted">{file ? (file.size / 1024 / 1024).toFixed(2) : "0"} MiB · temporary original bytes</p><button onClick={() => input.current?.click()} className="control mt-4 border border-border">Replace photo</button></div></div>}
+                <label className="mt-5 flex cursor-pointer items-start gap-3 border-t border-border pt-5 text-sm"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} className="mt-1 h-4 w-4 accent-[var(--cobalt)]" /><span>I confirm this is my photo or a consenting teammate&apos;s public content, and I may send it to Google for this search.</span></label>
+                <button onClick={search} disabled={!file || !consent || busy !== null} className="primary mt-5 w-full">{busy === "search" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}{busy === "search" ? "Encoding and searching…" : "Find public matches"}</button>
+              </section>
+
+              <section id="results" className="panel" aria-labelledby="results-title">
+                <div className="section-head"><div><p className="eyebrow">02 / Evidence</p><h2 id="results-title" className="mt-1 text-xl font-semibold">Returned pages</h2></div><span className="tag">{run?.candidates.length || 0} FOUND</span></div>
+                {!run ? <div className="py-12 text-center text-sm text-muted">Live search results appear here. No invented matches are shown.</div> : run.candidates.length === 0 ? <div className="notice-warning">No matching pages were returned. Try a better-indexed photo.</div> :
+                  <div className="space-y-3">{run.candidates.map((candidate) => { const result = candidate.face_verification; const active = selected === candidate.index; return (
+                    <article key={`${candidate.page_url}-${candidate.index}`} className={`evidence-card border p-4 ${active ? "border-cobalt shadow-[var(--shadow)]" : "border-border"}`}>
+                      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between"><div className="min-w-0"><div className="mb-2 flex gap-2"><span className="tag text-cobalt">{candidate.reverse_match_type}</span><span className={`tag ${candidate.is_social ? "bg-success-soft text-success" : "bg-warning-soft text-warning"}`}>{candidate.is_social ? "SOCIAL" : "NON-SOCIAL"}</span></div><h3 className="truncate font-semibold">{candidate.page_title || "Untitled returned page"}</h3><a href={candidate.page_url} target="_blank" rel="noopener noreferrer" className="mt-1 flex min-h-11 min-w-0 items-center gap-1 text-sm text-cobalt underline decoration-transparent underline-offset-4 hover:decoration-current"><span className="truncate">{candidate.page_url}</span><ArrowUpRight className="h-4 w-4 shrink-0" /></a></div>
+                        <button onClick={() => verify(candidate.index)} disabled={busy !== null} className="control shrink-0 border border-border">{busy === "verify" && active ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Fingerprint className="h-4 w-4" />}{result ? "Check again" : "Check face"}</button></div>
+                      {result && <div className={`mt-3 border-l-4 p-3 text-sm ${result.status === "verified" ? "border-success bg-success-soft text-success" : result.status === "unavailable" ? "border-warning bg-warning-soft text-warning" : "border-danger bg-danger-soft text-danger"}`}><strong className="block">{result.status === "verified" ? "Face verified" : result.status === "unavailable" ? "Image unavailable — inspect manually" : "Face did not verify"}</strong><span>{result.distance === null ? result.reason : `Distance ${result.distance.toFixed(4)} · threshold ${result.threshold?.toFixed(4)}`}</span></div>}
+                    </article>); })}</div>}
+              </section>
             </div>
-          ) : (
-            <div className="max-w-2xl mx-auto space-y-10">
-              <div className="text-center space-y-2">
-                <h2 className="text-2xl font-bold tracking-tight">Verify a Face</h2>
-                <p className="text-xs text-muted">Upload an image or capture one to begin</p>
-              </div>
 
-              <Card className="cursor-pointer transition-shadow hover:shadow-md" onDrop={handleDrop} onDragOver={(e) => e.preventDefault()}>
-                <CardContent className="flex flex-col items-center justify-center py-14 text-center">
-                  <div className="mb-5 rounded-xl border border-dashed border-border/75 bg-input/50 p-6 w-72 flex flex-col items-center">
-                    <Upload className="mx-auto mb-3 h-10 w-10 text-muted/70" />
-                    <p className="mb-0.5 text-sm font-medium">Drag images here or click to upload</p>
-                    <p className="text-[11px] text-muted">JPG, PNG. Max 8MB. One face required.</p>
-                  </div>
-                  <Input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleFileUpload} />
-                  <Button variant="outline" size="sm" onClick={() => fileInputRef.current?.click()}>Browse Files</Button>
-                </CardContent>
-              </Card>
-
-              <div className="flex items-center justify-center gap-3">
-                <span className="text-xs text-muted/50">or</span>
-                <Button variant="outline" onClick={openCamera} className="gap-2">
-                  <Camera className="h-4 w-4" /> Capture from Camera
-                </Button>
-              </div>
-
-              {images.length > 0 && (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-medium text-muted">{images.length} image{images.length !== 1 ? "s" : ""}</span>
-                    <Button variant="ghost" size="sm" onClick={() => setImages([])} className="h-6 text-[11px]"><X className="h-3 w-3 mr-1" /> Clear</Button>
-                  </div>
-                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                    {images.map((img) => (
-                      <div key={img.id} className="relative rounded-xl border border-border/75 bg-card overflow-hidden group">
-                        <img src={img.preview} alt={img.name} className="h-36 w-full object-cover" />
-                        <button onClick={() => removeImage(img.id)} className="absolute right-2 top-2 rounded-full bg-background/80 p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"><X className="h-3 w-3" /></button>
-                        <div className="p-2.5 flex items-center justify-between">
-                          <div className="min-w-0"><p className="truncate text-[11px] font-medium">{img.name}</p><p className="text-[10px] text-muted">{formatSize(img.size)}</p></div>
-                          {img.status === "idle" && <Button variant="outline" size="sm" onClick={() => handleEncode(img.id)} className="text-[11px] h-6">Encode</Button>}
-                          {img.status === "encoding" && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted" />}
-                          {img.status === "ready" && <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />}
-                          {img.status === "error" && <AlertCircle className="h-3.5 w-3.5 text-red-500" />}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <Card className="py-6 px-8">
-                <label className="text-xs font-medium">Notes</label>
-                <Textarea placeholder="Add any context about this verification..." value={note} onChange={(e) => setNote(e.target.value)} className="mt-1.5 min-h-[60px] text-xs" />
-              </Card>
-
-              <div className="flex justify-end gap-3">
-                <Button variant="outline" size="default">Save Draft</Button>
-                <Button size="default" onClick={handleSubmit} disabled={loading || images.filter((i) => i.status === "ready").length === 0}>
-                  {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                  {loading ? "Submitting..." : "Submit for Verification"}
-                </Button>
-              </div>
-            </div>
-          )}
-        </div>
-      </main>
-
-      {cameraOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90">
-          <div className="flex flex-col items-center gap-4">
-            <video ref={videoRef} autoPlay playsInline className="h-[75vh] w-auto max-w-lg rounded-lg" />
-            <canvas ref={canvasRef} className="hidden" />
-            <div className="flex gap-3">
-              <Button size="default" onClick={captureImage} className="gap-2"><Camera className="h-4 w-4" /> Capture</Button>
-              <Button variant="outline" size="default" onClick={() => { if (cameraStream) { cameraStream.getTracks().forEach((t) => t.stop()); setCameraStream(null); } setCameraOpen(false); }}>Close</Button>
-            </div>
+            <aside id="proof" className="space-y-5">
+              <section className="panel"><p className="eyebrow">Live status</p><h2 className="mt-1 text-xl font-semibold">Pipeline readiness</h2><div className="mt-5 space-y-3">{Object.entries(health?.checks || { backend: health?.status === "online" }).map(([label, ready]) => <div key={label} className="flex items-center justify-between border-b border-border pb-3 text-sm last:border-0"><span>{label.replace(/([A-Z])/g, " $1")}</span><span className={`inline-flex items-center gap-1 font-mono text-xs ${ready ? "text-success" : "text-warning"}`}>{ready ? <Check className="h-3.5 w-3.5" /> : <CircleAlert className="h-3.5 w-3.5" />}{ready ? "READY" : "SETUP"}</span></div>)}</div>{health?.error && <p className="mt-4 text-sm text-danger">{health.error}</p>}</section>
+              <section className="panel"><p className="eyebrow">Run trace</p><h2 className="mt-1 text-xl font-semibold">Integrity proof</h2><dl className="mt-5 space-y-4 text-sm"><div><dt className="text-muted">Run state</dt><dd className="mt-1 font-semibold">{run ? statusText[run.status] || run.status : "Waiting for input"}</dd></div><div><dt className="text-muted">Photo SHA-256</dt><dd className="mt-1 break-all font-mono text-xs">{short(run?.photoCommitment)}</dd></div><div><dt className="text-muted">0G storage root</dt><dd className="mt-1 break-all font-mono text-xs">{short(run?.storage?.rootHash)}</dd></div><div><dt className="text-muted">Chain record</dt><dd className="mt-1 font-mono text-xs">{run?.chain?.recordId ?? "Pending"}</dd></div></dl>{run?.status === "complete" && run.chain && <a href={run.chain.explorerUrl} target="_blank" rel="noopener noreferrer" className="mt-5 flex min-h-11 items-center justify-center gap-2 rounded-lg bg-success-soft px-4 text-sm font-semibold text-success">View transaction<ArrowUpRight className="h-4 w-4" /></a>}</section>
+              {choice && face && face.status !== "not_verified" && run?.status !== "complete" && <section className="panel border-cobalt shadow-[var(--shadow)]"><p className="eyebrow">Final gate</p><h2 className="mt-1 text-xl font-semibold">Confirm and publish</h2><p className="mt-2 text-sm text-muted">The matched URL and evidence become public in 0G Storage. The chain stores commitments.</p><label className="mt-5 block text-sm font-medium">Operator label<input value={operator} onChange={(event) => setOperator(event.target.value)} maxLength={80} className="mt-2 min-h-11 w-full rounded-lg border border-border bg-input px-3 focus:border-cobalt" /></label><label className="check-row"><input type="checkbox" checked={reviewed} onChange={(event) => setReviewed(event.target.checked)} />I opened the returned page and confirmed the consenting subject.</label><label className="check-row"><input type="checkbox" checked={approved} onChange={(event) => setApproved(event.target.checked)} />I approve publishing this record to 0G testnet.</label>{!health?.commitReady && <p className="mt-4 text-xs text-warning">Wallet or contract setup is incomplete. Backend preflight will block writes.</p>}<button onClick={commit} disabled={!eligible || busy !== null} className="primary mt-5 w-full">{busy === "commit" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}{busy === "commit" ? "Publishing and verifying…" : "Commit verified record"}</button></section>}
+            </aside>
           </div>
         </div>
-      )}
+        <p className="sr-only" aria-live="polite">{busy ? `${busy} in progress` : run ? statusText[run.status] || run.status : "Ready"}</p>
+      </main>
     </div>
   );
 }

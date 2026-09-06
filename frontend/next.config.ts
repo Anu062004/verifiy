@@ -1,9 +1,10 @@
 import type { NextConfig } from "next";
+import { resolve } from "node:path";
 
 const nextConfig: NextConfig = {
   output: "standalone",
   turbopack: {
-    root: "/Users/macavenue/Desktop/Goa/frontend",
+    root: resolve(process.cwd(), ".."),
   },
 };
 

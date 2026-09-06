@@ -21,6 +21,8 @@ Environment: macOS ARM64, Python 3.12.11 in the local `.venv`, Node 24.18.0, npm
 | Runtime npm audit | `npm audit --omit=dev`: 0 findings |
 | Full npm audit | 19 findings: 11 low, 2 moderate, 6 high, all in development dependency paths |
 | Live authenticated preflight | Stopped with “Your default credentials were not found” |
+| Scrape-fallback probe (Bing kblob upload, 2026-09-06) | Upload accepted (HTTP 200, signed token from homepage, visual best-guess ran server-side), but the only redirect target is a keyword web search — no per-image match evidence; detail view 302-redirects home without an image id. Keyword results are not image-match evidence, so no scrape provider was added. |
+| Scrape-fallback probe (Lens uploadbyurl, 2026-09-06) | Session issued (vsrid), but results sit behind a JS-redirect interstitial requiring a browser engine; by-URL flow would also require publishing the raw face publicly. Not pursued. |
 
 The development advisories come through the pinned Hardhat 2 stack (including its archive, HTTP, serialization, temporary-file, and older cryptography dependencies). The compiler is loaded from pinned local `solc`; no remote compiler archive was used. The required live adapters use the patched runtime dependency graph. Do not interpret the runtime audit result as a full security assessment. Review or migrate the development toolchain before a production deployment.
 

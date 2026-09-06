@@ -1,4 +1,4 @@
-import { Camera, Search, Shield, Database, Clock, CheckCircle2, Activity } from "lucide-react";
+import { Camera, Shield, Database, Clock, CheckCircle2, Activity } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
